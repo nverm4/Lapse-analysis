@@ -69,4 +69,16 @@ The repository contains four main files:
 - **Report_part1.pdf** — Exploratory data analysis  
 - **Report_part2.pdf** — Modeling and evaluation  
 - **part1.txt** — R code used for the exploratory analysis in Report_part1  
-- **part
+- **part2.txt** — R code used for the modeling and evaluation in Report_part2  
+
+---
+
+## Skills Demonstrated
+
+- End‑to‑end analytical workflow  
+- Data cleaning and preprocessing  
+- Feature engineering and dimensionality reduction  
+- Handling imbalanced classification problems  
+- Hyperparameter tuning and model comparison  
+- Strong proficiency in **R** and statistical modeling  
+- Clear documentation of methodology and results  
