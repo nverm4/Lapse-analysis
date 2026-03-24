@@ -1,0 +1,755 @@
+### library #####
+library(factoextra)
+library(ggplot2)
+library(CASdatasets)
+library(FactoMineR)
+library(fastDummies)
+library(cluster)
+library(FNN)
+library(gglasso)
+library(glmnet)
+library(caret)
+library(rpart.plot)
+library(pROC)
+library(PRROC)
+library(randomForest)
+options(rgl.useNULL = TRUE)
+library(rgl)
+library(xgboost)
+library(iml)
+
+data("eudirectlapse")
+
+data <- eudirectlapse
+
+
+################# Changements au data ####
+data$prem_freqperyear <- factor(data$prem_freqperyear, levels(data$prem_freqperyear)[c(2, 4, 3, 1)])
+data$polholder_diffdriver <- factor(data$polholder_diffdriver,
+                                    levels(data$polholder_diffdriver)[c(3, 7, 1, 4, 5, 2, 6)])
+
+data$vehicl_powerkw <- factor(data$vehicl_powerkw, levels(data$vehicl_powerkw)[c(7, 11, 1, 2, 3, 4, 5, 6, 8, 9, 10)])
+levels(data$vehicl_powerkw) <- c("25-50kW", "75kW", "100kW", rep("125-300kW", 8))
+data <- data[, !(colnames(data) %in% "policy_nbcontract")]
+data <- data[data$prem_last != max(data$prem_last), ]
+data$lapse <- as.factor(ifelse(data$lapse == 0, "No", "Yes"))
+
+###### data numérique
+data_num <- data
+levels(data_num$polholder_diffdriver) <- c(rep("autre", 4),
+                                           "same", rep("autre", 2))     # pour avoir 2 groupes
+nom_retire <- c("lapse", "policy_nbcontract", "prem_freqperyear",
+                "vehicl_garage", "vehicl_region", "policy_caruse")
+data_num <- data_num[, !(colnames(data) %in% nom_retire)]
+
+
+# création des indicatrices
+data_num <- dummy_cols(data_num, remove_most_frequent_dummy = TRUE)
+nom_retire_ind <- c("polholder_BMCevol", "polholder_gender", "polholder_job",
+                    "vehicl_powerkw", "polholder_diffdriver")
+data_num <- data_num[, !(colnames(data_num) %in% nom_retire_ind)]
+
+
+# création des variables de différences
+data_num$Diff_last_vs_final <- (data_num$prem_last - data_num$prem_final)/
+    data_num$prem_last
+
+data_num$Diff_final_vs_market <- (data_num$prem_final - data_num$prem_market)/
+    data_num$prem_final
+
+data_num$rabais <- as.numeric((data_num$prem_final - data_num$prem_pure)/
+                                  data_num$prem_final < 0)
+
+data_obs <- cbind(lapse = data$lapse, data_num)
+
+###### data à utiliser : data_obs
+
+## Séparer data en entrainement et test
+str(data_obs)
+data_scale <- scale(data_obs[, -c(1, 10:17, 20)])
+data_scale <- cbind(lapse = data_obs$lapse, as.data.frame(data_scale), data_obs[, c(10:17, 20)])
+proportion_entrainement <- 0.8
+
+# séparer selon variable réponse
+zero <- which(data_scale$lapse == "No")
+un <- which(data_scale$lapse == "Yes")
+
+taille_ech_0 <- floor(proportion_entrainement * length(zero))
+set.seed(20251903)
+idx_entrainement_0 <- sample(zero, size = taille_ech_0)
+
+taille_ech_1 <- floor(proportion_entrainement * length(un))
+set.seed(20251903)
+idx_entrainement_1 <- sample(un, size = taille_ech_1)
+
+idx_entr <- sort(c(idx_entrainement_0, idx_entrainement_1))
+
+obs_entrainement <- data_scale[idx_entr, -1]
+obs_test <- data_scale[-idx_entr, -1]
+
+
+# Étiquettes en caractères
+etiq_entrainement <- data_scale[idx_entr, 1]
+etiq_test <- data_scale[-idx_entr, 1]
+
+# Étiquettes numériques
+etiq_entrainement_reg <- ifelse(etiq_entrainement == "Yes", 1, 0)
+etiq_test_reg <- ifelse(etiq_test == "Yes", 1, 0)
+
+################# Changements au data POUR LES ARBRES ####
+# data pas scale, car on veut que les règles de décision soient facilement interprétables
+# donc qu'elles soient sur leur échelle initiale
+obs_arbre_entr <- data_obs[idx_entr, -1]
+obs_arbre_test <- data_obs[-idx_entr, -1]
+
+# il y avait un problème avec le nom des variables vehicl_powerkw_25-50kW et vehicl_powerkw_125-300kW
+# nous les avons donc renommer vehicl_powerkw_1 et vehicl_powerkw_3
+
+colnames(obs_arbre_entr) <- c(colnames(obs_arbre_entr)[1:13], "vehicl_powerkw_1",
+                              colnames(obs_arbre_entr)[15], "vehicl_powerkw_3",
+                              colnames(obs_arbre_entr)[-(1:16)])
+
+colnames(obs_arbre_test) <- c(colnames(obs_arbre_test)[1:13], "vehicl_powerkw_1",
+                              colnames(obs_arbre_test)[15], "vehicl_powerkw_3",
+                              colnames(obs_arbre_test)[-(1:16)])
+
+arbre_entr <- cbind(obs_arbre_entr,lapse = etiq_entrainement_reg)
+arbre_test <- cbind(obs_arbre_test,lapse = etiq_test_reg)
+arbre_entr_nom <- cbind(obs_arbre_entr,lapse = etiq_entrainement)
+arbre_test_nom <- cbind(obs_arbre_test,lapse = etiq_test)
+
+
+
+### Vérifications du data d'entrainement pour variables catégorielles ####
+# s'assurer que chacune des catégories est présente dans le data d'entrainement
+table(obs_entrainement$polholder_BMCevol_down)
+table(obs_entrainement$polholder_BMCevol_up)
+table(obs_entrainement$polholder_diffdriver_same)
+table(obs_entrainement$polholder_gender_Female)
+table(obs_entrainement$polholder_job_medical)
+table(obs_entrainement[, "vehicl_powerkw_25-50kW"])
+table(obs_entrainement[, "vehicl_powerkw_100kW"])
+table(obs_entrainement[, "vehicl_powerkw_125-300kW"])
+table(obs_entrainement$rabais)
+# ok toutes les catégories sont présentes
+
+
+#########################################################
+################# Modèle 1 : GLM ####
+set.seed(1)
+fit_glm <- glm(lapse~., data = cbind(lapse = etiq_entrainement, obs_entrainement),
+               family = "binomial")
+summary(fit_glm)
+
+intercept_only <- glm(lapse ~ 1,
+                      family = binomial(link="logit"),
+                      data=cbind(lapse = etiq_entrainement, obs_entrainement))
+
+# méthode "stepwise"
+debut_glm <- Sys.time()
+mod.glm <- step(intercept_only, direction='both', scope=formula(fit_glm))
+fin_glm <- Sys.time()
+saveRDS(mod.glm, "Modèles RDS/modele_glm.RDS")
+# mod.glm <- readRDS("Modèles RDS/modele_glm.RDS")
+
+mod.glm$coefficients
+
+# trouver seuil
+set.seed(1)
+prob_glm_mod <- predict(mod.glm, type = "response", newdata = obs_entrainement)
+
+roc_glm <- roc(etiq_entrainement_reg, prob_glm_mod, auc=TRUE, plot=TRUE)
+c_glm <- cbind(roc_glm$thresholds, round(roc_glm$sensitivities,4), round(roc_glm$specificities,4))
+
+sss_glm <- c_glm[6862, ]
+seuil_glm <- sss_glm[1]
+
+# tester le seuil sur les données d'entrainement
+table(1*(prob_glm_mod > seuil_glm), etiq_entrainement_reg)
+
+## Tester le modèle sur les données de test
+prob_glm <- predict(mod.glm, type = "response", newdata = obs_test)
+pred_binaire_glm <- 1*(prob_glm > seuil_glm) # range : 0.02935963 0.43690426
+
+# Metrique
+mat_glm <- caret::confusionMatrix(as.factor(pred_binaire_glm), as.factor(etiq_test_reg), positive="1")
+
+################# Modèle 2 : GLM avec régularisation ####
+# Lasso groupé
+group <- c(1:10, rep(11, 2), 12:14, rep(15, 3), 16)
+# mettre les étiquettes en format {-1, 1}, soit 0 == -1 et 1 == 1
+etiq_entrainement_lasso <- ifelse(etiq_entrainement == "Yes", 1, -1)
+etiq_test_lasso <- ifelse(etiq_test == "Yes", 1, -1)
+
+debut_lasso <- Sys.time()
+set.seed(20250326)
+cv_lasso <- cv.gglasso(x = as.matrix(obs_entrainement),
+                       y = etiq_entrainement_lasso,
+                       pred.loss="loss",
+                       loss="logit",
+                       nfolds = 5,
+                       group = group)
+# pred.loss = "loss" : classification, loss = "logit" : fonction de perte logistique
+fin_lasso <- Sys.time()
+
+
+set.seed(20250326)
+mod.lasso <- gglasso(x = as.matrix(obs_entrainement),
+                     y = etiq_entrainement_lasso,
+                     loss="logit",
+                     group = group)
+# mod.lasso <- readRDS("Modèles RDS/modele_lasso.RDS")
+
+# Trouver le meilleur lambda avec la validation croisée
+which(cv_lasso$lambda == cv_lasso$lambda.min)         # donc pas l'extrémité des valeurs de lambda essayées, donc ok
+meilleur.lam.lasso <- cv_lasso$lambda.min
+
+## tester le modèle sur données d'entrainement
+x.train <- model.matrix(lapse ~ .,
+                        data = cbind(obs_entrainement,
+                                     "lapse" = etiq_entrainement_lasso))[, -1]
+
+pred_lasso <- predict(mod.lasso,
+                      type = "link",
+                      newx = x.train,
+                      s = meilleur.lam.lasso)
+pred_lasso_mod  <- exp(pred_lasso) / (1 + exp(pred_lasso))
+
+
+roc_lasso <- roc(etiq_entrainement_reg, c(pred_lasso_mod), auc=TRUE, plot=TRUE)
+c_lasso <- cbind(roc_lasso$thresholds, round(roc_lasso$sensitivities,4), round(roc_lasso$specificities,4))
+
+sss_lasso <- c_lasso[6780, ]
+seuil_lasso <- sss_lasso[1]
+
+# tester le seuil sur les données d'entrainement
+table(1*(pred_lasso_mod > seuil_lasso), etiq_entrainement_reg)
+
+
+# prévisions données test
+x.test <- model.matrix(lapse ~ ., data = cbind(obs_test,
+                                               "lapse" = etiq_test_lasso))[, -1]
+
+pred.lasso.test <- predict(mod.lasso,
+                           type = "link",
+                           newx = x.test,
+                           s = meilleur.lam.lasso)
+prob_lasso <- exp(pred.lasso.test) / (1 + exp(pred.lasso.test))
+
+pred_binaire_lasso <- 1 * (prob_lasso > seuil_lasso)
+
+# qualité prévisions
+# Metrique
+mat_lasso <- caret::confusionMatrix(as.factor(pred_binaire_lasso), as.factor(etiq_test_reg), positive="1")
+
+################# Modèle 3 : k P.P.V ####
+set.seed(202344)
+# suréchantillonnage car données déséquilibrées
+trControl <- trainControl(method  = "cv", # validation croisée
+                          summaryFunction = twoClassSummary,
+                          classProbs = TRUE,
+                          number  = 5)
+debut_knn <- Sys.time()
+mod.knn <- caret::train(lapse ~ .,
+                        method = "knn",
+                        tuneGrid = expand.grid(k = 1:10),
+                        trControl = trControl,
+                        metric = "ROC",
+                        data = cbind(obs_entrainement, lapse = etiq_entrainement))
+fin_knn <- Sys.time()
+# mod.knn <- readRDS("Modèles RDS/modele_knn.RDS")
+
+k_optimal <- unlist(as.vector(mod.knn$bestTune))
+
+### Tester le modèle sur les données d'entrainement pour déterminer le seuil optimal
+modele_knn_reg <- knn.reg(train = obs_entrainement, y = etiq_entrainement_reg,
+                          k = k_optimal)           # sans argument test pour faire c. v.
+
+roc_knn <- roc(etiq_entrainement_reg, modele_knn_reg$pred, auc=TRUE, plot=TRUE)
+c_knn <- cbind(roc_knn$thresholds, round(roc_knn$sensitivities,4), round(roc_knn$specificities,4))
+
+sss_knn <- c_knn[2, ]
+seuil_knn <- sss_knn[1]
+
+# tester le seuil sur les données d'entrainement
+table(1*(modele_knn_reg$pred > seuil_knn), etiq_entrainement_reg)
+
+## Tester le modèle avec les données de test
+modele_knn_test <- knn.reg(train = obs_test,
+                           y = etiq_test_reg,
+                           k = k_optimal)
+
+pred_binaire_knn <- 1 * (modele_knn_test$pred > seuil_knn)
+
+# Metrique
+mat_knn <- caret::confusionMatrix(as.factor(pred_binaire_knn),
+                                  as.factor(etiq_test_reg), positive="1")
+
+################# Modèle 4 : Arbre de décision ####
+set.seed(4)
+trControl <- trainControl(method  = "cv",
+                          summaryFunction = twoClassSummary,
+                          classProbs = TRUE,
+                          number  = 5)
+
+# valeur optimale de l'hyperparam. cp
+debut_arbre <- Sys.time()
+set.seed(4)
+mod.cv_fitted_arbre <- caret::train(lapse ~ .,
+                                    data = arbre_entr_nom,
+                                    method = "rpart",
+                                    tuneLength = 10,
+                                    metric = "ROC",
+                                    trControl = trControl)
+fin_arbre <- Sys.time()
+# mod.cv_fitted_arbre <- readRDS("Modèles RDS/modele_arbre.RDS")
+
+cp_optimal <- unlist(as.vector(mod.cv_fitted_arbre$bestTune))
+
+# Modèle
+tree.control <- rpart.control(cp = 0,
+                              minbucket = 1,
+                              minsplit = 1)      # surajustement
+
+arbre <- rpart(lapse ~ .,
+               control = tree.control,
+               data = arbre_entr,
+               method = "class")
+
+arbre_elag <- rpart::prune(arbre, cp = cp_optimal)
+
+# Tester le modèle avec les données d'entrainement
+rpart.plot(arbre_elag, fallen.leaves = FALSE, tweak = 0.8)
+
+pred_arbre_mod <- predict(arbre_elag, arbre_entr, type = "prob") # type = "prob" : mieux dans un contexte de données déséquilibrées
+
+roc_arbre <- roc(arbre_entr$lapse, pred_arbre_mod[, 2], auc = TRUE, plot = TRUE)
+c_arbre <- cbind(roc_arbre$thresholds, roc_arbre$sensitivities, roc_arbre$specificities)
+
+sss_arbre <- c_arbre[18, ]
+seuil_arbre <- sss_arbre[1]
+
+# tester le seuil sur les données d'entrainement
+table(1*(pred_arbre_mod[, 2] > seuil_arbre), etiq_entrainement_reg)
+
+# Tester le modèle sur les données de test
+pred_arbre <- predict(arbre_elag, arbre_test, type = "prob")
+pred_binaire_arbre <- 1*(pred_arbre[, 2] > seuil_arbre)
+
+# Métriques
+mat_arbre <- caret::confusionMatrix(as.factor(pred_binaire_arbre),
+                                    as.factor(etiq_test_reg), positive="1")
+
+################# Modèle 5 : Ensemble d'a. d. bagging ####
+set.seed(5)
+bag_test_B <- randomForest(lapse~.,
+                           data = arbre_entr_nom,
+                           mtry = 19,
+                           sampsize = nrow(arbre_entr),
+                           ntree = 150, ## test avec graphique
+                           nodesize = 2)
+
+
+## test pour nombre d'arbres (B)
+plot(1:dim(bag_test_B$err.rate)[1],
+     bag_test_B$err.rate[,1],
+     type="l",
+     xlab="B",
+     ylab="Taux d'erreur OOB",
+     main="Bagging") ## 100 okay stabilisé depuis 80
+
+
+## trouver nodesize
+## séparer le 80% en valid
+set.seed(7)
+ind.val <- sample(1:nrow(arbre_entr_nom), 0.2*nrow(arbre_entr_nom), FALSE)
+dat.valid <- arbre_entr_nom[ind.val,]
+dat.non.valid <- arbre_entr_nom[-ind.val,]
+
+debut_bag <- Sys.time()
+prev.nodesize <- rep(0, 15)
+for(i in 1:15){
+    set.seed(6)
+    bag.node <- randomForest(lapse~.,
+                             data= dat.non.valid,
+                             ntree = 100,
+                             nodesize = i,
+                             mtry = 19,
+                             sampsize = nrow(dat.non.valid))
+
+    bag.node.prev <- predict(bag.node, newdata=dat.valid, type="prob")
+    bag.node.res <- roc(dat.valid$lapse, bag.node.prev[,2], auc=TRUE, plot=FALSE)
+
+    prev.nodesize[i] <- bag.node.res$auc
+}
+fin_bag <- Sys.time()
+
+node_optimal <- which.max(prev.nodesize)
+# saveRDS(node_optimal, "Modèles RDS/node_optimal_bag.RDS")
+
+### bag_final
+mod.bag <- randomForest(lapse~.,
+                        data = arbre_entr_nom,
+                        mtry = 19,
+                        sampsize = nrow(arbre_entr_nom),
+                        importance = TRUE,
+                        ntree = 100,
+                        nodesize = node_optimal)
+# mod.bag <- readRDS("Modèles RDS/modele_bag.RDS")
+
+## choix de seuil
+pred_bag_mod <- predict(mod.bag, arbre_entr, type = "prob")
+
+roc_bag <- roc(arbre_entr$lapse, pred_bag_mod[, 2], auc = TRUE, plot = TRUE)
+c_bag <- cbind(roc_bag$thresholds, roc_bag$sensitivities, roc_bag$specificities)
+
+sss_bag <- c_bag[39, ]
+seuil_bag <- sss_bag[1]
+
+# tester le seuil sur les données d'entrainement
+table(1*(pred_bag_mod[, 2] > seuil_bag), etiq_entrainement_reg)
+
+## prévisions sur tests
+pred_bag <- predict(mod.bag, arbre_test, type = "prob")
+pred_binaire_bag <- 1*(pred_bag[, 2] > seuil_bag)
+
+# Métriques
+mat_bag <- caret::confusionMatrix(as.factor(pred_binaire_bag), as.factor(etiq_test_reg), positive="1")
+
+################# Modèle 6 : Forêt aléatoire ####
+set.seed(8)
+foret_test_B <- randomForest(lapse~.,
+                             data = arbre_entr_nom,
+                             mtry = floor(sqrt(19)),
+                             sampsize = floor(0.75*nrow(arbre_entr_nom)),
+                             ntree = 150, ## test avec graphique
+                             nodesize = 2)
+
+## test pour nombre d'arbres (B)
+plot(1:dim(foret_test_B$err.rate)[1],foret_test_B$err.rate[,1], type="l", xlab="B", ylab="Taux d'erreur OOB", main="Forêt") ## 100 okay stabilisé depuis 80
+
+## trouver nodesize et mtry
+
+## séparer le 80% en valid
+set.seed(7)
+ind.val <- sample(1:nrow(arbre_entr_nom), 0.2*nrow(arbre_entr_nom), FALSE)
+dat.valid <- arbre_entr_nom[ind.val,]
+dat.non.valid <- arbre_entr_nom[-ind.val,]
+
+prev <- matrix(numeric(15*19), 15, 19)
+
+debut_foret <- Sys.time()
+set.seed(6)
+for(j in 1:19){
+    for(i in 1:15){
+        bag.node <- randomForest(lapse~.,
+                                 data= dat.non.valid,
+                                 ntree = 100,
+                                 nodesize = i,
+                                 mtry = j,
+                                 sampsize = floor(0.75*nrow(dat.non.valid)))
+        bag.node.prev <- predict(bag.node, newdata=dat.valid, type="prob")
+        bag.node.res <- roc(dat.valid$lapse, bag.node.prev[, 2], auc=TRUE, plot=FALSE)
+        prev[i, j] <- bag.node.res$auc
+    }
+}
+fin_foret <- Sys.time()
+
+max(prev)
+which.max(prev)
+optimal <- c(mtry=floor(43/15) + 1, nodesize=(43/15 - floor(43/15))*15)
+
+
+## foret finale
+mod.foret <- randomForest(lapse~.,
+                          data = arbre_entr_nom,
+                          mtry = optimal["mtry"],
+                          sampsize = floor(0.75*nrow(arbre_entr_nom)),
+                          ntree = 100,
+                          nodesize = optimal["nodesize"])
+# mod.foret <- readRDS("Modèles RDS/modele_foret.RDS")
+
+## choix de seuil
+pred_foret_mod <- predict(mod.foret, arbre_entr, type = "prob")
+
+roc_foret <- roc(arbre_entr$lapse, pred_foret_mod[, 2], auc = TRUE, plot = TRUE)
+c_foret <- cbind(roc_foret$thresholds, roc_foret$sensitivities, roc_foret$specificities)
+
+sss_foret <- c_foret[16, ]
+seuil_foret <- sss_foret[1]
+
+# tester le seuil sur les données d'entrainement
+table(1*(pred_foret_mod[, 2]> seuil_foret), etiq_entrainement_reg)
+
+## prévisions sur tests
+pred_foret <- predict(mod.foret, arbre_test, type = "prob")
+pred_binaire_foret <- 1*(pred_foret[, 2] > seuil_foret)
+
+# Métriques
+mat_foret <- caret::confusionMatrix(as.factor(pred_binaire_foret), as.factor(etiq_test_reg), positive="1")
+
+################# Modèle 7 : Gradient boosting ####
+controles <- trainControl(method="cv", number= 5,
+                          summaryFunction = twoClassSummary,
+                          classProbs = TRUE)
+
+grid_xgboost <- expand.grid(
+    nrounds = (1:10) * 100,
+    max_depth = c(2, 3, 5, 7),
+    eta = 0.01,      # lambda
+    min_child_weight = 5,   # nb d'obs par feuille
+    subsample = 0.75,
+    gamma = 0.3,
+    colsample_bytree =  1
+)
+
+# Transformation des données sous forme de matrice
+
+# On crée une matrice pour nos variables explicatives
+input_x <- as.matrix(dplyr::select(arbre_entr_nom, -lapse))
+
+# Puis un vecteur pour notre variable réponse
+input_y <- arbre_entr_nom[, "lapse"]
+
+set.seed(125, sample.kind = "Rejection")
+
+fin_xg <- Sys.time()
+# Finalement, on entraîne notre modèle
+mod.xgboost <- caret::train(x = input_x,
+                            y = input_y,
+                            trControl = controles,
+                            tuneGrid = grid_xgboost,
+                            method = "xgbTree",
+                            tree_method = "approx",
+                            verbosity = 0,
+                            metric = "ROC")
+fin_xg <- Sys.time()
+# mod.xgboost <- readRDS("Modèles RDS/modele_xgboost.RDS")
+
+(param_optimaux <- mod.xgboost$bestTune)
+plot(mod.xgboost)
+
+pred_xg_mod <- predict(mod.xgboost, newdata = arbre_entr_nom, type = "prob")
+
+roc_xg <- roc(arbre_entr$lapse, pred_xg_mod[, 2], auc = TRUE, plot = TRUE)
+c_xg <- cbind(roc_xg$thresholds, round(roc_xg$sensitivities,4), round(roc_xg$specificities,4))
+
+sss_xg <- c_xg[7541, ]
+seuil_xg <- sss_xg[1]
+
+# tester le seuil sur les données d'entrainement
+table(1*(pred_xg_mod[, 2] > seuil_xg), etiq_entrainement_reg)
+
+# tester sur données tests
+pred_xg <- predict(mod.xgboost, arbre_test_nom, type = "prob")
+pred_xg_binaire <- 1*(pred_xg[, 2] > seuil_xg)
+
+# Métriques
+mat_xg <- caret::confusionMatrix(as.factor(pred_xg_binaire),
+                                 as.factor(etiq_test_reg),
+                                 positive="1")
+
+#########################################################
+### Comparaision de la f mesure ######
+f <- round(c(glm=mat_glm$byClass["F1"], lasso=mat_lasso$byClass["F1"],
+             knn=mat_knn$byClass["F1"], arbre=mat_arbre$byClass["F1"],
+             bag=mat_bag$byClass["F1"], foret=mat_foret$byClass["F1"],
+             xg=mat_xg$byClass["F1"]),4)
+f_type <- c("glm", "lasso", "knn", "arbre", "bag", "foret", "boosting")
+f_mesure <- as.data.frame(x=cbind(f_type, f))
+
+
+### Graphique courbe ROC des données de test #####
+glm.res <- roc(etiq_test_reg, prob_glm, auc=TRUE, plot=TRUE)
+glm.res$auc
+
+lasso.res <- roc(etiq_test_reg, prob_lasso, auc=TRUE, plot=TRUE)
+lasso.res$auc
+
+knn.res <- roc(etiq_test_reg, modele_knn_test$pred , auc=TRUE, plot=TRUE)
+knn.res$auc
+
+arbre.res <- roc(etiq_test_reg, pred_arbre[,2], auc=TRUE, plot=TRUE)
+arbre.res$auc
+
+bag.res <- roc(etiq_test_reg, pred_bag[,2], auc=TRUE, plot=TRUE)
+bag.res$auc
+
+foret.res <- roc(etiq_test_reg, pred_foret[,2], auc=TRUE, plot=TRUE)
+foret.res$auc
+
+xg.res <- roc(etiq_test_reg, pred_xg[,2], auc=TRUE, plot=TRUE)
+xg.res$auc
+
+AUC <- round(c(glm = glm.res$auc, lasso = lasso.res$auc,
+               knn = knn.res$auc, arbre = arbre.res$auc,
+               bag = bag.res$auc, foret = foret.res$auc,
+               xg = xg.res$auc),4)
+
+AUC_type <- names(AUC)
+AUC_metric <- as.data.frame(x=cbind(AUC_type, AUC))
+
+### Graphique de courbe ROC des données d'entrainement ####
+plot(roc_glm)
+points(x=sss_glm[3], y=sss_glm[2], pch=16, col="red")
+text(x=sss_glm[3]+0.2, y=sss_glm[2]+0.1,
+     label=paste0("seuil = ", round(sss_glm[1],4)))
+
+plot(roc_lasso)
+points(x=sss_lasso[3], y=sss_lasso[2], pch=16, col="red")
+text(x=sss_lasso[3]+0.2, y=sss_lasso[2]+0.1,
+     label=paste0("seuil = ", round(sss_lasso[1],4)))
+
+plot(roc_knn)
+points(x=sss_knn[3], y=sss_knn[2], pch=16, col="red")
+text(x=sss_knn[3]+0.2, y=sss_knn[2]+0.1,
+     label=paste0("seuil = ", round(sss_knn[1],4)))
+
+plot(roc_arbre)
+points(x=sss_arbre[3], y=sss_arbre[2], pch=16, col="red")
+text(x=sss_arbre[3]+0.2, y=sss_arbre[2]+0.1,
+     label=paste0("seuil = ", round(sss_arbre[1],4)))
+
+plot(roc_bag)
+points(x=sss_bag[3], y=sss_bag[2], pch=16, col="red")
+text(x=sss_bag[3]-0.25, y=sss_bag[2]-0.09,
+     label=paste0("seuil = ", round(sss_bag[1],4)))
+
+plot(roc_foret)
+points(x=sss_foret[3], y=sss_foret[2], pch=16, col="red")
+text(x=sss_foret[3]-0.25, y=sss_foret[2]-0.09,
+     label=paste0("seuil = ", round(sss_foret[1],4)))
+
+plot(roc_xg)
+points(x=sss_xg[3], y=sss_xg[2], pch=16, col="red")
+text(x=sss_xg[3]+0.2, y=sss_xg[2]+0.1,
+     label=paste0("seuil = ", round(sss_xg[1],4)))
+
+plot(mod.xgboost)
+
+### sensibilité ####
+sens <- round(c(glm = mat_glm$byClass["Sensitivity"],
+                lasso=mat_lasso$byClass["Sensitivity"],
+                knn=mat_knn$byClass["Sensitivity"],
+                arbre=mat_arbre$byClass["Sensitivity"],
+                bag=mat_bag$byClass["Sensitivity"],
+                foret=mat_foret$byClass["Sensitivity"],
+                xg=mat_xg$byClass["Sensitivity"]), 4)
+s_type <- c("glm", "lasso", "knn", "arbre", "bag", "foret", "boosting")
+sensibility <- as.data.frame(x=cbind(s_type, sens))
+
+###  GRAPHIQUES ####
+ggplot(sensibility, aes(x=s_type, y=as.numeric(sens))) +
+    geom_bar(stat="identity") +
+    scale_y_continuous(limits=c(0, 0.8)) +
+    geom_text(aes(label=sens), vjust=-0.2) +
+    labs(x="Modèle", y="Sensibilité")
+
+ggplot(AUC_metric, aes(x=AUC_type, y=as.numeric(AUC))) +
+    geom_bar(stat="identity") +
+    scale_y_continuous(limits=c(0, 0.7)) +
+    geom_text(aes(label=AUC), vjust=-0.2) +
+    labs(x="Modèle", y="AUC")
+
+ggplot(f_mesure, aes(x=f_type, y=as.numeric(f))) +
+    geom_bar(stat="identity") +
+    scale_y_continuous(limits=c(0, 0.3)) +
+    geom_text(aes(label=f), vjust=-0.2) +
+    labs(x="Modèle", y="F-mesure")
+
+# Importances des variables du modèle de boosting
+plot(varImp(mod.xgboost))
+
+#### comparaison de temps ####
+# fin_glm-debut_glm
+# fin_lasso-debut_lasso
+# fin_knn-debut_knn
+# fin_arbre-debut_arbre
+# fin_bag-debut_bag
+# fin_foret-debut_foret
+# fin_xg-debut_xg
+
+#### Comparaison des modèles ####
+# interprétation
+set.seed(1244,  sample.kind = "Rejection")
+predict.fun <- function(model, newdata){
+
+    predict(model, newdata, type = "prob")
+
+}
+predictor.xg <- Predictor$new(
+    model = mod.xgboost,
+    data = arbre_entr_nom,
+    y = etiq_entrainement,
+    predict.fun = predict.fun)
+
+
+test <- Interaction$new(mod.iml, "Diff_last_vs_final", grid.size=5)
+plot(test)
+
+#aucune conclusion
+test2 <- Interaction$new(mod.iml, "policy_age", grid.size=5)
+plot(test2)
+
+test3 <- FeatureEffect$new(mod.iml, "Diff_last_vs_final", method = "pdp", grid.size = 50)
+plot(test3)
+
+### (Lasso)
+library(iml)
+colnames(obs_entrainement) <- c(colnames(obs_entrainement)[1:15], "vehicl_powerkw_1",
+                                colnames(obs_entrainement)[17], "vehicl_powerkw_3",
+                                colnames(obs_entrainement)[19])
+
+group <- c(1:10, rep(11, 2), 12:14, rep(15, 3), 16)
+# mettre les étiquettes en format {-1, 1}, soit 0 == -1 et 1 == 1
+etiq_entrainement_lasso <- ifelse(etiq_entrainement == "Yes", 1, -1)
+etiq_test_lasso <- ifelse(etiq_test == "Yes", 1, -1)
+
+set.seed(20250326)
+cv_lasso <- cv.gglasso(x = as.matrix(obs_entrainement),
+                       y = etiq_entrainement_lasso,
+                       pred.loss="loss",
+                       loss="logit",
+                       nfolds = 5,
+                       group = group)
+# pred.loss = "loss" : classification, loss = "logit" : fonction de perte logistique
+set.seed(20250326)
+mod.lasso <- gglasso(x = as.matrix(obs_entrainement),
+                     y = etiq_entrainement_lasso,
+                     loss="logit",
+                     group = group)
+##
+n <- names(mod.lasso$beta[, 65][abs(mod.lasso$beta[, 65]) > 0])
+n <- c(n[1:13], "vehicl_powerkw_1", n[15], "vehicl_powerkw_3", n[17])
+
+obs_lasso <- obs_entrainement[, colnames(obs_entrainement) %in% n]
+
+set.seed(1244,  sample.kind = "Rejection")
+predict.fun <- function(model, newdata){
+
+    predict(model, newdata, type = "link", s=meilleur.lam.lasso)
+
+}
+predictor.lasso <- Predictor$new(
+    model = mod.lasso,
+    data = obs_entrainement,
+    y = etiq_entrainement_lasso,
+    predict.fun = predict.fun,
+    class = "classification")
+
+# pdp
+xgb.ice.bm <- FeatureEffect$new(predictor.lasso,
+                                "polholder_BMCevol_down",
+                                method="pdp", grid.size=15)
+
+exp(xgb.ice.bm$results[2])/(1 + exp(xgb.ice.bm$results[2]))
+
+xgb.ice.bmu <- FeatureEffect$new(predictor.lasso,
+                                 "polholder_BMCevol_up",
+                                 method="pdp", grid.size=15)
+
+exp(xgb.ice.bmu$results[2])/(1 + exp(xgb.ice.bmu$results[2]))
+
+# H friedman
+int.down <- Interaction$new(predictor.lasso, "polholder_BMCevol_down", grid.size = 5)
+plot(int.down)
