@@ -3,6 +3,8 @@
 
 This project presents a complete predictive modeling workflow applied to a real‑world classification problem in auto‑insurance. Using the **eudirectlapse** dataset from the **CASdatasets** R package, the analysis focuses on identifying factors associated with customer lapse behavior. The repository includes two detailed reports covering exploratory data analysis, feature engineering, dimensionality reduction, and model development.
 
+The reports in this repository are written in French. If you’d like an English explanation or summary, don’t hesitate to contact me!
+
 ---
 
 ## Exploratory Data Analysis
