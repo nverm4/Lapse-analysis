@@ -1,11 +1,307 @@
-﻿Améliorer pylint : fichier main.py
-# Please enter the commit message for your changes. Lines starting
-# with '#' will be ignored, and an empty message aborts the commit.
+library(factoextra)
+library(ggplot2)
+library(CASdatasets)
+library(FactoMineR)
+library(fastDummies)
+library(cluster)
+
+data("eudirectlapse")
+
+data <- eudirectlapse
+
+
+### Exploration ####
+str(data)           # type ok
+summary(data)
+dim(data)
+
+# % d'assurés qui partent
+sum(data$lapse == 1)/nrow(data)
+
+## données aberrantes
+# variable non documentée
+# observation du lien entre la dernière prime et le nombre de contrats : la moyenne ne semble pas être impactée par le nb de contrats
+ggplot(data, aes(y=prem_last)) + geom_boxplot() + facet_grid(~policy_nbcontract) +
+    theme(axis.text.x = element_text(angle = 90))
+data <- data[, !(colnames(data) %in% "policy_nbcontract")]      # on ne comprend pas la variable
+
+
+
+## Changements des levels
+table(data$vehicl_powerkw)
+# groupes devraient être regroupés, car l'intervalle 125-300 kW inclut d'autres groupes
+levels(data$vehicl_powerkw) <- c("100 kW","125-300 kW","125-300 kW",
+                                 "125-300 kW","125-300 kW","125-300 kW",
+                                 "25-50 kW","125-300 kW","125-300 kW",
+                                 "125-300 kW", "75 kW")
+data$prem_freqperyear <- factor(data$prem_freqperyear, levels(data$prem_freqperyear)[c(2, 4, 3, 1)])
+data$vehicl_powerkw <- factor(data$vehicl_powerkw, levels(data$vehicl_powerkw)[c(3, 4, 1, 2)])
+
+
+### Analyse exploratoire individuelle ####
+# graphiques individuels pour variables catégorielles (graphique à bandes)
+
+ggplot(data, aes(y=polholder_BMCevol)) + geom_bar()     # pas beaucoup d'accidents (up)
+ggplot(data, aes(x=polholder_diffdriver)) + geom_bar()  # Distribution inégale, à regrouper dans autre section
+ggplot(data, aes(x=polholder_gender)) + geom_bar()      # plus d'hommes que de femmes
+ggplot(data, aes(x=polholder_job)) + geom_bar()         # beaucoup de médical, même si moins populaire dans les observations
+ggplot(data, aes(x = policy_caruse)) + geom_bar()       # quasiment une seule catégorie (pratiquement aucun commercial)
+ggplot(data, aes(x=prem_freqperyear)) + geom_bar()      # majorité des gens paient annuellement
+ggplot(data, aes(y=vehicl_garage)) + geom_bar()
+ggplot(data, aes(y=vehicl_powerkw)) + geom_bar()        # beaucoup de voitures moins puissantes
+ggplot(data, aes(y=vehicl_region)) + geom_bar()         # difficile à extraire des conclusions, car on ne sait pas quelles sont les régions
+
+
+
+# histogrammes individuels pour distribution donnes munériques
+ggplot(data, aes(x=polholder_age)) + geom_histogram()       # majorité entre 30 et 50 ans
+ggplot(data, aes(x=policy_age)) + geom_histogram()          # beaucoup de nouvelles polices
+ggplot(data, aes(x=vehicl_age)) + geom_histogram()          # beaucoup de vieux véhicules
+ggplot(data, aes(x=vehicl_agepurchase)) + geom_histogram()  # plus de véhicules achetés usagés
+
+# primes
+summary(data$prem_last)
+summary(data$prem_final)
+summary(data$prem_market)
+summary(data$prem_pure)
+
+## observations aberrantes
+ggplot(data, aes(y=prem_last, col = factor(lapse))) + geom_boxplot()        # maximum bizarre
+head(sort(data$prem_last, decreasing = TRUE))
+data <- data[data$prem_last != max(data$prem_last), ]
+####
+
+
+
+#### Graphiques exploratoires en fonction de la variable réponse
+ggplot(data, aes(x = polholder_age, fill = factor(lapse))) +
+    geom_bar(position = PositionDodge)         # même comportement, mais avec un nombre d'assurés différent
+
+prop.table(table(data$lapse, data$polholder_BMCevol), 2)        # Bonus Malus down : moins de renouvellement en proportion
+
+prop.table(table(data$lapse, data$polholder_diffdriver), 2)
+table(data$polholder_diffdriver)            # commercial est très différent, mais peu de données
+
+prop.table(table(data$lapse, data$polholder_gender), 2)
+ggplot(data, aes(x = factor(lapse))) + geom_bar(position = PositionDodge) +
+    facet_grid(~polholder_gender)                            # même chose en proportion
+
+prop.table(table(data$lapse, data$polholder_job), 2)        # même chose en proportion
+
+ggplot(data, aes(x = policy_age, fill = factor(lapse))) + geom_bar(position = PositionDodge)
+prop.table(table(data$lapse, data$policy_age), 2)           # légère augmentation constante
+
+prop.table(table(data$lapse, data$policy_caruse), 2)        # plutôt semblable
+
+# primes
+ggplot(data, aes(y=prem_final, col = factor(lapse))) +
+    geom_boxplot()
+ggplot(data, aes(y=prem_market, col = factor(lapse))) +
+    geom_boxplot()
+ggplot(data, aes(y=prem_last, col = factor(lapse))) +
+    geom_boxplot()
+ggplot(data, aes(y=prem_pure, col = factor(lapse))) +
+    geom_boxplot()      # il n'y a pas vraiment de grandes observations (même médiane sensiblement)
+                        # le montant de la prime n'affecte pas le choix de renouvellement, alors il faudrait tester avec l'augmentation
+
+prop.table(table(data$lapse, data$prem_freqperyear), 2)
+ggplot(data, aes(x=factor(lapse))) + geom_bar() + facet_grid(~prem_freqperyear) # pas vraiment de grandes observations
+
+ggplot(data, aes(y=vehicl_age, col = factor(lapse))) + geom_boxplot()
+ggplot(data, aes(y=vehicl_agepurchase, col = factor(lapse))) + geom_boxplot()   # pas vraiment intéressant
+
+ggplot(data, aes(x = vehicl_garage, fill = factor(lapse))) +
+    geom_bar(position = "dodge") + theme(axis.text.x = element_text(angle = 90))
+prop.table(table(data$lapse, data$vehicl_garage), 2)        # pas très différent
+
+ggplot(data, aes(x = vehicl_powerkw, fill = factor(lapse))) +
+    geom_bar(position = "dodge")
+prop.table(table(data$lapse, data$vehicl_powerkw), 2)       # pas très différent
+
+ggplot(data, aes(x = vehicl_region, fill = factor(lapse))) +
+    geom_bar(position = "dodge")
+prop.table(table(data$lapse, data$vehicl_region), 2)        # pas très différent
+######
+
+####
+data_num <- data[, c(2, 7, 9, 11:15)]
+# pairs(data_num)               #######################################################
+
+cormat <- cor(data_num, method = "pearson")
+cormat.long <- reshape2::melt(cormat)
+ggplot(cormat.long, aes(Var2, Var1, fill = value)) + geom_tile() +
+    theme(axis.text.x = element_text(angle = 90)) +
+    scale_fill_gradient(low = "#56B1F7", high = "#132B43")
+
+
+
+
+
+### Création de nouvelles variables
+
+
+## Préparation du data
+data_acp <- data
+levels(data_acp$polholder_diffdriver) <- c(rep("autre", 4),
+                                           "same", rep("autre", 2))     # pour avoir 2 groupes
+nom_retire <- c("lapse", "policy_nbcontract", "prem_freqperyear", "vehicl_agepurchase",
+                "vehicl_garage", "vehicl_region", "policy_caruse")
+data_acp <- data_acp[, !(colnames(data) %in% nom_retire)]
+
+
+# création des indicatrices
+data_acp <- dummy_cols(data_acp, remove_most_frequent_dummy = TRUE)
+nom_retire_ind <- c("polholder_BMCevol", "polholder_gender", "polholder_job",
+                    "vehicl_powerkw", "polholder_diffdriver")
+data_acp <- data_acp[, !(colnames(data_acp) %in% nom_retire_ind)]
+
+
+# création des variables des différences
+data_acp$Diff_last_vs_final <- (data_acp$prem_last - data_acp$prem_final)/
+    data_acp$prem_last
+# stable = variation +/- 1 %
+
+data_acp$Diff_final_vs_market <- (data_acp$prem_final - data_acp$prem_market)/
+    data_acp$prem_final
+# stable = variation +/- 1 %
+
+data_acp$rabais <- as.numeric((data_acp$prem_final - data_acp$prem_pure)/
+    data_acp$prem_final < 0)
+# si < 0, sûrement un rabais
+
+
+##### Analyse des nouvelles variables
+
+# pairs(data_acp)               #######################################################
+
+## matrice de corrélation
+cormat <- cor(data_acp, method = "pearson")
+cormat.long <- reshape2::melt(cormat)
+ggplot(cormat.long, aes(Var2, Var1, fill = value)) + geom_tile() +
+    theme(axis.text.x = element_text(angle = 90)) +
+    scale_fill_gradient(low = "#56B1F7", high = "#132B43")
+
+
+# primes
+data_obs <- cbind(lapse = data$lapse, data_acp)
+summary(data_obs$Diff_final_vs_market)
+summary(data_obs$Diff_last_vs_final)
+
+ggplot(data_obs, aes(y=Diff_final_vs_market, col = factor(lapse))) + geom_boxplot()
+ggplot(data_obs, aes(y=Diff_last_vs_final, col = factor(lapse))) + geom_boxplot()
+
+## variation prime
+ggplot(data, aes(x=prem_final, y = prem_market, col = factor(lapse))) + geom_point() +facet_grid(~polholder_BMCevol) + geom_abline() ## aucune tendance de comportement
+ggplot(data, aes(x=prem_final, y = prem_last, col = factor(lapse))) + geom_point() +facet_grid(~polholder_BMCevol) + geom_abline()
+ggplot(data_obs, aes(x=prem_final, y = prem_last, col = factor(lapse))) + geom_point() ## aucune tendance de comportement 
+
+ggplot(data[data$lapse==0 &data$polholder_BMCevol=="up", ], aes(x=prem_final, y = prem_market, col = polholder_BMCevol)) + geom_point()
+ggplot(data[data$lapse==1 &data$polholder_BMCevol=="up", ], aes(x=prem_final, y = prem_market, col = polholder_BMCevol)) + geom_point()
+ggplot(data[data$lapse==0 &data$polholder_BMCevol=="down", ], aes(x=prem_final, y = prem_market, col = polholder_BMCevol)) + geom_point()
+ggplot(data[data$lapse==1 &data$polholder_BMCevol=="down", ], aes(x=prem_final, y = prem_market, col = polholder_BMCevol)) + geom_point()
+
+# rabais et médical
+ggplot(data_obs, aes(x=rabais, fill= factor(lapse))) + geom_bar(position = PositionDodge)
+ggplot(data_obs, aes(x=polholder_job_medical, fill= factor(lapse))) + 
+  geom_bar(position = PositionDodge) ## médical n'affecte pas vrm conportement assuré
+ggplot(data_obs, aes(x=rabais, fill= factor(polholder_job_medical))) + 
+  geom_bar(position = PositionDodge) ## médical pourrait en effet donner rabais
+ggplot(data_obs[data_obs$polholder_job_medical==1, ], aes(x=rabais)) + 
+  geom_bar(position = PositionDodge) ## pas tout médical qui a rabais
+ggplot(data_obs, aes(x=rabais, fill= factor(lapse))) + 
+  geom_bar(position = PositionDodge) ## médical pourrait en effet donner rabais
+# policy_age
+ggplot(data_obs, aes(x = Diff_final_vs_market, col = factor(lapse))) + 
+  facet_grid(~policy_age) + geom_boxplot() + coord_flip()
+ggplot(data_obs, aes(x=prem_final, y = prem_market, col = policy_age)) + 
+  geom_point(alpha = 0.4) + facet_grid(~factor(lapse)) + 
+  scale_color_gradient(low="pink", high="red") ## graphique montre que plus policy_age est haut, plus le marché et l'assureur semble être pareil.
+                                              ## note assureur semble donc offrir meilleurs prix nouveaux assurés
+
+
+### ***************************** (analyse avec variable réponse)
+ggplot(data_obs, aes(x = Diff_last_vs_final, col = factor(lapse))) + facet_grid(~polholder_BMCevol_down) +
+    geom_boxplot() + coord_flip() + labs(y = "Diminution du Bonus Malus") 
+
+data_test <- cbind(data_obs, polholder_BMCevol =data$polholder_BMCevol)
+ggplot(data_test, aes(x = prem_market, col = factor(lapse))) + facet_grid(~polholder_BMCevol_down) +
+    geom_boxplot() + coord_flip() + labs(y = "Diminution du Bonus Malus")
+
+ggplot(data_test, aes(x = Diff_final_vs_market, col = factor(lapse))) + facet_grid(~polholder_BMCevol_down) +
+    geom_boxplot() + coord_flip() + labs(y = "Diminution du Bonus Malus")
+
+#### ********************* 
+ggplot(data_test, aes(x = prem_market, y = prem_last, col = factor(polholder_BMCevol))) +
+    geom_point(alpha = 0.2)
+ggplot(data_test, aes(x = prem_final, y = prem_last, col = factor(polholder_BMCevol))) +
+    geom_point(alpha = 0.2) ## le marché n'utilise pas bonus-malus même façon
+
+
+
+ggplot(data_obs[data_obs$polholder_BMCevol_down==1, ], aes(x =prem_last, y = prem_final, col = factor(lapse))) +
+  geom_point(alpha = 0.4) ## majorité des points bleus sur droite, donc personnes qui on améliorer expérience, 
+                           ##mais pas eu avantage sur prime. Luxe de pouvir aller magasiner ailleurs
+ggplot(data_obs[data_obs$polholder_BMCevol_down==1, ], aes(x =prem_market, y = prem_final, col = factor(lapse))) +
+  geom_point(alpha = 0.4)
+ggplot(data_obs[data_obs$polholder_BMCevol_up==1, ], aes(x =prem_last, y = prem_final, col = factor(lapse))) +
+  geom_point(alpha = 0.4) ## difficle conclure, peu de données
+ggplot(data_obs[data_obs$polholder_BMCevol_up==1, ], aes(x =prem_market, y = prem_final, col = factor(lapse))) +
+  geom_point(alpha = 0.4)
+
+
+
+### ACP
+ggplot(data, aes(y=prem_last)) + geom_boxplot() + facet_grid(~prem_freqperyear) +
+    theme(axis.text.x = element_text(angle = 90))
+
+
+
+acp <- PCA(data_acp, scale.unit = TRUE)
+fviz_pca_var(acp, col.var="contrib", gradient.cols=c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel=T)
+acp$eig                                     # 12 composantes pour 82.5 %
+fviz_screeplot(acp, ncp = 20)               # 13 composantes
+
+
+weights <- data.frame(acp$var$coord[,1:5])
+weights$carac <- rownames(weights)
+weights.long <- reshape2::melt(weights)
+
+ggplot(weights.long, aes(x=carac, fill=variable, y=value))+
+    geom_bar(stat="identity",position=PositionDodge)+
+    facet_grid(~variable)+
+    theme(legend.position="top",axis.text.x = element_text(angle = 90))+
+    coord_flip()
+
+
+
+### classification hiérachique
+data_acp_scale <- scale(data_acp)
+# sample
+set.seed(2025)
+sample_hc <- data_acp_scale[sample(nrow(data_acp_scale), 0.25 * nrow(data_acp_scale)), ]
+hc_min <- hclust(dist(sample_hc, method = "euclidean"), method = "single")
+plot(hc_min)
+
+hc_max <- hclust(dist(sample_hc, method = "euclidean"), method = "complete")
+plot(hc_max)
+
+hc_ward <- hclust(dist(sample_hc, method = "euclidean"), method = "ward.D")
+plot(hc_ward)
+
+fviz_nbclust(x = sample_hc, FUNcluster = hcut, hc_method = "ward.D", method = "wss", k.max = 10)
+fviz_nbclust(x = sample_hc, FUNcluster = hcut, hc_method = "ward.D", method = "silhouette", k.max = 10)
 #
-# On branch master
-# Your branch is ahead of 'origin/master' by 2 commits.
-#   (use "git push" to publish your local commits)
-#
-# Changes to be committed:
-#	modified:   main.py
-#
+
+# tout le data
+hc_ward_tot <- hclust(dist(data_acp_scale, method = "euclidean"), method = "ward.D")
+ct_ward <- cutree(hc_ward_tot, 7)
+
+data$groupe <- factor(ct_ward)
+table(data$groupe)
+
+rect.hclust(hc_ward, 6)
+
+
+
+
